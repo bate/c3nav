@@ -114,6 +114,9 @@ def map_index(request, mode=None, slug=None, slug2=None, details=None, options=N
         })
 
     initial_bounds = settings.INITIAL_BOUNDS
+    if not initial_bounds:
+        initial_bounds = (0, 0, 10, 10)
+
     ctx = {
         'bounds': json.dumps(Source.max_bounds(), separators=(',', ':')),
         'levels': json.dumps(tuple((level.pk, level.short_label) for level in levels.values()), separators=(',', ':')),
@@ -209,12 +212,18 @@ def login_view(request):
     else:
         form = AuthenticationForm(request)
 
-    return render(request, 'site/account_form.html', {
+    ctx = {
         'title': _('Log in'),
         'form': form,
-        'bottom_link_url': reverse('site.register'),
-        'bottom_link_text': _('Create new account')
-    })
+    }
+
+    if settings.USER_REGISTRATION:
+        ctx.update({
+            'bottom_link_url': reverse('site.register'),
+            'bottom_link_text': _('Create new account')
+        })
+
+    return render(request, 'site/account_form.html', ctx)
 
 
 @never_cache
@@ -225,6 +234,9 @@ def logout_view(request):
 
 @never_cache
 def register_view(request):
+    if not settings.USER_REGISTRATION:
+        return HttpResponse(_('account creation is currently disabled.'), content_type='text/plain', status=403)
+
     if request.user.is_authenticated:
         return close_response(request)
 
