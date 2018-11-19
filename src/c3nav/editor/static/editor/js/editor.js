@@ -9,7 +9,7 @@ editor = {
             renderer: L.svg({ padding: 2 }),
             zoom: 2,
             maxZoom: 10,
-            minZoom: 0,
+            minZoom: -5,
             crs: L.CRS.Simple,
             editable: true,
             zoomSnap: 0
@@ -110,6 +110,17 @@ editor = {
         // unload the sidebar. called on sidebar_get and form submit.
         editor._level_control.disable();
         editor._sublevel_control.disable();
+
+        if (editor._source_image_layer) {
+            editor._source_image_layer.remove();
+            editor._source_image_layer = null;
+        }
+
+        if (editor._fixed_point_layer) {
+            editor._fixed_point_layer.remove();
+            editor._fixed_point_layer = null;
+        }
+
         $('#sidebar').addClass('loading').find('.content').html('');
         editor._cancel_editing();
     },
@@ -148,6 +159,49 @@ editor = {
         var nav = content.find('.nav');
         if (nav.length) {
             $('#navbar-collapse').find('.nav').html(nav.html());
+        }
+
+        var group;
+        if (content.find('[name=fixed_x]')) {
+            $('[name=name]').change(editor._source_name_selected).change();
+            if (!content.find('[data-new]').length) {
+                var bounds = [[parseFloat(content.find('[name=left]').val()), parseFloat(content.find('[name=bottom]').val())], [parseFloat(content.find('[name=right]').val()), parseFloat(content.find('[name=top]').val())]];
+                bounds = L.GeoJSON.coordsToLatLngs(bounds);
+                editor.map.fitBounds(bounds, {padding: [30, 50]});
+            }
+
+            group = $('<div class="form-group-group source-wizard">');
+            group.insertBefore(content.find('[name=fixed_x]').closest('.form-group'));
+            group.append(content.find('[name=fixed_x]').closest('.form-group'));
+            group.append(content.find('[name=fixed_y]').closest('.form-group'));
+
+            content.find('[name=fixed_x], [name=fixed_y]').change(editor._fixed_point_changed).change();
+            content.find('[name=copy_from]').change(editor._copy_from_changed);
+
+            group = $('<div class="form-group-group source-wizard">');
+            group.insertBefore(content.find('[name=scale_x]').closest('.form-group'));
+            group.append(content.find('[name=scale_x]').closest('.form-group'));
+            group.append(content.find('[name=scale_y]').closest('.form-group'));
+
+            content.find('[name=left], [name=bottom], [name=right], [name=top]').change(editor._source_image_bounds_changed);
+            content.find('[name=scale_x], [name=scale_y]').change(editor._source_image_scale_changed);
+            content.find('[name=left], [name=bottom], [name=right], [name=top]').each(function() { $(this).data('oldval', $(this).val()); });
+
+            content.find('[name=lock_aspect], [name=lock_scale]').closest('.form-group').addClass('source-wizard');
+
+            var source_width = (parseFloat(content.find('[name=right]').val()) || 0) - (parseFloat(content.find('[name=left]').val()) || 0),
+                source_height = (parseFloat(content.find('[name=top]').val()) || 0) - (parseFloat(content.find('[name=bottom]').val()) || 0);
+            editor._source_aspect_ratio = source_width/(source_height || 1);
+        }
+        if (content.find('[name=left]')) {
+            group = $('<div class="form-group-group">');
+            group.insertBefore(content.find('[name=left]').closest('.form-group'));
+            group.append(content.find('[name=left]').closest('.form-group'));
+            group.append(content.find('[name=top]').closest('.form-group'));
+            group = $('<div class="form-group-group">');
+            group.insertBefore(content.find('[name=right]').closest('.form-group'));
+            group.append(content.find('[name=right]').closest('.form-group'));
+            group.append(content.find('[name=bottom]').closest('.form-group'));
         }
 
         content.find('[data-toggle="tooltip"]').tooltip();
@@ -292,6 +346,183 @@ editor = {
         $.post(action, data, editor._sidebar_loaded).fail(editor._sidebar_error);
     },
 
+    _source_image_orig_width: 0,
+    _source_image_orig_height: 0,
+    _source_image_aspect_ratio: 0,
+    _source_image_untouched: 0,
+    _source_image_layer: null,
+    _source_name_selected: function() {
+        if (editor._source_image_layer) {
+            editor._source_image_layer.remove();
+            editor._source_image_layer = null;
+        }
+        $('<img src="/editor/sourceimage/'+$(this).val()+'">').on('load', editor._source_name_selected_ajax_callback);
+        $('#sidebar form').removeClass('show-source-wizard');
+        $('body').removeClass('map-enabled');
+    },
+    _source_name_selected_ajax_callback: function() {
+        if ($(this).attr('src').endsWith($('#sidebar [name=name]').val())) {
+            $('#sidebar form').addClass('show-source-wizard');
+            $(this).appendTo('body').hide();
+            editor._source_image_orig_width = $(this).width();
+            editor._source_image_orig_height = $(this).height();
+            $(this).remove();
+            $('body').addClass('map-enabled');
+            var content = $('#sidebar');
+            if (content.find('[data-new]').length || isNaN(parseFloat(content.find('[name=right]').val())) || isNaN(parseFloat(content.find('[name=left]').val())) || isNaN(parseFloat(content.find('[name=top]').val())) || isNaN(parseFloat(content.find('[name=bottom]').val()))) {
+                editor._source_aspect_ratio = $(this).width()/$(this).height();
+                content.find('[name=left]').val(0).data('oldval', 0);
+                content.find('[name=bottom]').val(0).data('oldval', 0);
+                var factor = 1;
+                while(factor < 1000 && (editor._source_image_orig_width/factor)>1500) {
+                    factor *= 10;
+                }
+                var width = (editor._source_image_orig_width/factor).toFixed(2),
+                    height = (editor._source_image_orig_height/factor).toFixed(2);
+                content.find('[name=right]').val(width).data('oldval', width);
+                content.find('[name=top]').val(height).data('oldval', height);
+                content.find('[name=scale_x]').val(1/factor);
+                content.find('[name=scale_y]').val(1/factor);
+            } else {
+                editor._source_image_calculate_scale();
+            }
+            editor._source_image_repositioned();
+        }
+    },
+    _source_image_repositioned: function() {
+        var content = $('#sidebar');
+        if (isNaN(parseFloat(content.find('[name=right]').val())) || isNaN(parseFloat(content.find('[name=left]').val())) || isNaN(parseFloat(content.find('[name=top]').val())) || isNaN(parseFloat(content.find('[name=bottom]').val()))) {
+            return;
+        }
+        var bounds = [[parseFloat(content.find('[name=left]').val()), parseFloat(content.find('[name=bottom]').val())], [parseFloat(content.find('[name=right]').val()), parseFloat(content.find('[name=top]').val())]];
+        bounds = L.GeoJSON.coordsToLatLngs(bounds);
+
+        editor._set_max_bounds(bounds);
+        if (editor._source_image_layer) {
+            editor._source_image_layer.setBounds(bounds)
+        } else {
+            editor._source_image_layer = L.imageOverlay('/editor/sourceimage/'+content.find('[name=name]').val(), bounds, {opacity: 0.3, zIndex: 10000});
+            editor._source_image_layer.addTo(editor.map);
+            if (content.find('[data-new]').length) {
+                editor.map.fitBounds(bounds, {padding: [30, 50]});
+            }
+        }
+    },
+    _source_image_calculate_scale: function() {
+        var content = $('#sidebar');
+        var source_width = parseFloat(content.find('[name=right]').val()) - parseFloat(content.find('[name=left]').val()),
+            source_height = parseFloat(content.find('[name=top]').val()) - parseFloat(content.find('[name=bottom]').val());
+        if (isNaN(source_width) || isNaN(source_height)) return;
+        var scale_x = (source_width/editor._source_image_orig_width).toFixed(3),
+            scale_y = (source_height/editor._source_image_orig_height).toFixed(3);
+        content.find('[name=scale_x]').val(scale_x);
+        content.find('[name=scale_y]').val(scale_y);
+        if (scale_x !== scale_y) {
+            content.find('[name=lock_aspect]').prop('checked', false);
+        }
+    },
+    _source_image_bounds_changed: function() {
+        var content = $('#sidebar'),
+            lock_scale = content.find('[name=lock_scale]').prop('checked'),
+            oldval = $(this).data('oldval'),
+            newval = $(this).val(),
+            diff = parseFloat(newval)-parseFloat(oldval);
+        $(this).data('oldval', newval);
+        if (lock_scale) {
+            if (!isNaN(diff)) {
+                var other_field_name = {left: 'right', right: 'left', top: 'bottom', bottom: 'top'}[$(this).attr('name')],
+                    other_field = content.find('[name='+other_field_name+']'),
+                    other_val = parseFloat(other_field.val());
+                if (!isNaN(other_val)) {
+                    other_field.val((other_val+diff).toFixed(2)).data('oldval', other_val);
+                }
+            }
+        } else {
+            editor._source_image_calculate_scale();
+        }
+        editor._source_image_repositioned();
+    },
+    _source_image_scale_changed: function() {
+        var content = $('#sidebar'),
+            lock_aspect = content.find('[name=lock_scale]').prop('checked');
+        if (lock_aspect) {
+            var other_field_name = {scale_x: 'scale_y', scale_y: 'scale_x'}[$(this).attr('name')],
+                other_field = content.find('[name='+other_field_name+']');
+            other_field.val($(this).val());
+        }
+        var f_scale_x = content.find('[name=scale_x]'),
+            f_scale_y = content.find('[name=scale_y]'),
+            scale_x = f_scale_x.val(),
+            scale_y = f_scale_y.val(),
+            fixed_x = parseFloat(content.find('[name=fixed_x]').val()),
+            fixed_y = parseFloat(content.find('[name=fixed_y]').val()),
+            left = parseFloat(content.find('[name=left]').val()),
+            bottom = parseFloat(content.find('[name=bottom]').val()),
+            right = parseFloat(content.find('[name=right]').val()),
+            top = parseFloat(content.find('[name=top]').val());
+
+        scale_x = parseFloat(scale_x);
+        scale_y = parseFloat(scale_y);
+
+        if (isNaN(scale_x) || isNaN(scale_y) || isNaN(fixed_x) || isNaN(fixed_y) || isNaN(left) || isNaN(bottom) || isNaN(right) || isNaN(top)) return;
+
+        var fixed_x_relative = (fixed_x-left)/(right-left),
+            fixed_y_relative = (fixed_y-bottom)/(top-bottom),
+            width = editor._source_image_orig_width*scale_x,
+            height = editor._source_image_orig_height*scale_y,
+            left = fixed_x-(width*fixed_x_relative),
+            bottom = fixed_y-(height*fixed_y_relative),
+            right = left+width,
+            top = bottom+height;
+
+        left = left.toFixed(2);
+        bottom = bottom.toFixed(2);
+        right = right.toFixed(2);
+        top = top.toFixed(2);
+
+        content.find('[name=left]').val(left).data('oldval', left);
+        content.find('[name=bottom]').val(bottom).data('oldval', bottom);
+        content.find('[name=right]').val(right).data('oldval', right);
+        content.find('[name=top]').val(top).data('oldval', top);
+
+        editor._source_image_repositioned();
+    },
+    _fixed_point_changed: function() {
+        var content = $('#sidebar'),
+            fixed_x = parseFloat(content.find('[name=fixed_x]').val()),
+            fixed_y = parseFloat(content.find('[name=fixed_y]').val()),
+            valid = (!isNaN(fixed_x) && !isNaN(fixed_y)),
+            latlng = valid ? L.GeoJSON.coordsToLatLng([fixed_x, fixed_y]) : null;
+
+        if (editor._fixed_point_layer) {
+            if (valid) {
+                editor._fixed_point_layer.setLatLng(latlng);
+            } else {
+                editor._fixed_point_layer.remove();
+                editor._fixed_point_layer = null;
+            }
+        } else if (valid) {
+            editor._fixed_point_layer = L.marker(latlng, {draggable: true, autoPan: true}).on('dragend', function(e) {
+                var coords = L.GeoJSON.latLngToCoords(e.target.getLatLng());
+                content.find('[name=fixed_x]').val(coords[0].toFixed(3));
+                content.find('[name=fixed_y]').val(coords[1].toFixed(3));
+            });
+            editor._fixed_point_layer.addTo(editor.map);
+        }
+    },
+    _copy_from_changed: function() {
+        var content = $('#sidebar'),
+            value = JSON.parse($(this).val());
+        $(this).val('');
+        if (!confirm('Are you sure you want to copy settings from '+value.name+'?')) return;
+        delete value.name;
+        for (key in value) {
+            content.find('[name='+key+']').val(value[key]);
+        }
+        editor._source_image_calculate_scale();
+        editor._source_image_repositioned();
+    },
+
     // geometries
     geometrystyles: {},
     _loading_geometry: false,
@@ -314,6 +545,7 @@ editor = {
     _arrow_colors: [],
     _last_vertex: null,
     _orig_vertex_pos: null,
+    _max_bounds: null,
     init_geometries: function () {
         // init geometries and edit listeners
         editor._highlight_layer = L.layerGroup().addTo(editor.map);
@@ -376,12 +608,17 @@ editor = {
             editor.geometrystyles = geometrystyles;
             $.getJSON('/api/editor/bounds/', function(bounds) {
                 bounds = L.GeoJSON.coordsToLatLngs(bounds.bounds);
-                editor.map.setMaxBounds(bounds);
+                editor._max_bounds = bounds;
+                editor._set_max_bounds();
                 editor.map.fitBounds(bounds, {padding: [30, 50]});
                 editor.init_sidebar();
             });
         });
         editor.get_sources();
+    },
+    _set_max_bounds: function(bounds) {
+        bounds = bounds ? L.latLngBounds(editor._max_bounds[0], editor._max_bounds[1]).extend(bounds) : editor._max_bounds;
+        editor.map.setMaxBounds(bounds);
     },
     _last_geometry_url: null,
     load_geometries: function (geometry_url, highlight_type, editing_id) {
@@ -400,6 +637,7 @@ editor = {
         editor._graph_edges_from = {};
         editor._graph_edges_to = {};
 
+        editor._set_max_bounds();
         $.getJSON(geometry_url, function(geometries) {
             editor.map.removeLayer(editor._highlight_layer);
             editor._highlight_layer.clearLayers();
@@ -488,7 +726,7 @@ editor = {
             if (layer.feature.properties.type === 'graphedge') {
                 var start_pos = 0.1,
                     end_pos = layer.length-0.1,
-                    color_index = editor._arrow_colors.indexOf(layer._path.getAttribute('stroke'));
+                    color_index = editor._arrow_colors.indexOf(layer._path.getAttribute('stroke')),
                     other = (editor._graph_edges_to[layer.feature.properties.from_node] !== undefined) ? editor._graph_edges_to[layer.feature.properties.from_node][layer.feature.properties.to_node] : undefined;
                 if (color_index === -1) {
                     color_index = editor._arrow_colors.length;
@@ -904,7 +1142,6 @@ editor = {
             item = data[i];
             apid = 'ap-'+item.bssid.replace(/:/g, '-');
             line = $table.find('tr.'+apid);
-            console.log(line);
             color = Math.max(0, Math.min(50, item.level+80));
             color = 'rgb('+String(250-color*5)+', '+String(color*4)+', 0)';
             if (line.length) {
